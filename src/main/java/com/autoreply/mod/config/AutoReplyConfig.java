@@ -1,40 +1,111 @@
-package com.autoreply.mod.config;
+package com.autoreply.mod.client;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import net.fabricmc.loader.api.FabricLoader;
+import com.autoreply.mod.config.AutoReplyConfig;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
+import org.lwjgl.glfw.GLFW;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.*;
-import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public class AutoReplyConfig {
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("auto-reply.json");
+public class AutoReplyClient implements ClientModInitializer {
 
-    public String geminiApiKey = "YOUR_GEMINI_API_KEY_HERE";
-    public String systemPrompt = "あなたはMinecraftプレイヤーです。チャットで来たメッセージに対して、短く自然な日本語で返信してください。返信は1-2文以内にしてください。";
-    public boolean autoReplyEnabled = false;
-    public int replyDelaySeconds = 2;
+    public static final Logger LOGGER = LoggerFactory.getLogger("autoreplymod");
+    public static AutoReplyConfig CONFIG;
 
-    public static AutoReplyConfig load() {
-        if (CONFIG_PATH.toFile().exists()) {
-            try (Reader reader = new FileReader(CONFIG_PATH.toFile())) {
-                AutoReplyConfig config = GSON.fromJson(reader, AutoReplyConfig.class);
-                return config != null ? config : new AutoReplyConfig();
-            } catch (Exception e) {
-                return new AutoReplyConfig();
+    private boolean wasPressed = false;
+    private boolean isReplying = false;
+
+    private static final Pattern CHAT_PATTERN = Pattern.compile("^<([^>]+)>\\s+(.+)$");
+    private static final String TRIGGER = "-rimuIA";
+
+    @Override
+    public void onInitializeClient() {
+        CONFIG = AutoReplyConfig.load();
+
+        // ;キーでオン/オフ
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            if (client.player == null) return;
+            if (client.screen != null) return;
+
+            long handle = client.getWindow().window;
+            boolean isPressed = GLFW.glfwGetKey(handle, GLFW.GLFW_KEY_SEMICOLON) == GLFW.GLFW_PRESS;
+
+            if (isPressed && !wasPressed) {
+                CONFIG.autoReplyEnabled = !CONFIG.autoReplyEnabled;
+                CONFIG.save();
+                String status = CONFIG.autoReplyEnabled
+                        ? "§a[rimuIA] 自動返信: ON (;キーで切替)"
+                        : "§c[rimuIA] 自動返信: OFF (;キーで切替)";
+                client.player.displayClientMessage(Component.literal(status), true);
             }
-        }
-        AutoReplyConfig config = new AutoReplyConfig();
-        config.save();
-        return config;
-    }
+            wasPressed = isPressed;
+        });
 
-    public void save() {
-        try (Writer writer = new FileWriter(CONFIG_PATH.toFile())) {
-            GSON.toJson(this, writer);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        // チャット受信時
+        ClientReceiveMessageEvents.CHAT.register((message, signedMessage, sender, params, receptionTimestamp) -> {
+            if (!CONFIG.autoReplyEnabled) return;
+            if (isReplying) return;
+
+            Minecraft client = Minecraft.getInstance();
+            if (client.player == null) return;
+
+            String rawMessage = message.getString();
+            String myName = client.player.getName().getString();
+
+            if (rawMessage.contains("<" + myName + ">")) return;
+
+            Matcher matcher = CHAT_PATTERN.matcher(rawMessage);
+            if (!matcher.matches()) return;
+
+            String senderName = matcher.group(1);
+            String chatContent = matcher.group(2).trim();
+
+            if (senderName.equals(myName)) return;
+            if (!chatContent.startsWith(TRIGGER)) return;
+
+            String actualMessage = chatContent.substring(TRIGGER.length()).trim();
+
+            LOGGER.info("[rimuIA] Triggered by {}: {}", senderName, actualMessage);
+
+            isReplying = true;
+            client.player.displayClientMessage(Component.literal("§7[rimuIA] 返信を考えています..."), true);
+
+            String prompt = String.format(
+                "%sというプレイヤーから「%s」というメッセージが来ました。返信してください。",
+                senderName, actualMessage.isEmpty() ? "（メッセージなし）" : actualMessage
+            );
+
+            GeminiClient.generateReply(CONFIG.geminiApiKey, CONFIG.systemPrompt, prompt)
+                    .orTimeout(20, TimeUnit.SECONDS)
+                    .whenComplete((reply, error) -> {
+                        isReplying = false;
+                        if (reply == null || error != null) {
+                            client.execute(() -> {
+                                if (client.player != null)
+                                    client.player.displayClientMessage(Component.literal("§c[rimuIA] 返信の生成に失敗しました"), true);
+                            });
+                            return;
+                        }
+
+                        try { Thread.sleep(CONFIG.replyDelaySeconds * 1000L); }
+                        catch (InterruptedException ignored) {}
+
+                        client.execute(() -> {
+                            if (client.player != null && client.getConnection() != null) {
+                                client.getConnection().sendChat(reply);
+                                client.player.displayClientMessage(Component.literal("§a[rimuIA] 送信: " + reply), true);
+                            }
+                        });
+                    });
+        });
+
+        LOGGER.info("[rimuIA] Auto Reply Mod initialized! Press ; to toggle.");
     }
 }
