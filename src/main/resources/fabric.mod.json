@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "autoreplymod",
+  "version": "${version}",
+  "name": "Auto Reply Mod",
+  "description": "Automatically replies to chat messages using Google Gemini AI",
+  "authors": ["YourName"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "client": ["com.autoreply.mod.client.AutoReplyClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": ">=26.1.2",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
